@@ -192,7 +192,7 @@ auto dispatch_call(Func &&func, const void *ptr, unsigned type_index) {
     }
 }
 
-/* Handle parameter packs with more than 8 types (const version) */
+/* Handle parameter packs with more than 8 types (non-const version) */
 template <typename Func, typename T0, typename T1, typename T2, typename T3,
         typename T4, typename T5, typename T6, typename T7, typename... Ts>
 auto dispatch_call(Func &&func, void *ptr, unsigned type_index) {

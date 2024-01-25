@@ -32,6 +32,11 @@ Zero-indexed, and determined at compile-time. */
 template <typename T, typename... Ts>
 constexpr unsigned IndexOfType_v = IndexOfType<T, Ts...>::value;
 
+/* `ContainsType<T, Ts...>` is satisfied iff `T` is one of the types in the parameter pack
+`Ts...`. */
+template <typename T, typename... Ts>
+concept ContainsType = (std::is_same_v<T, Ts> || ...);
+
 };  /* Ending bracket for `namespace detail` */
 
 /* `TaggedPointer<Ts...>` represents a type-tagged pointer to one of the set of types specified by
@@ -59,73 +64,107 @@ public:
 
     /* Returns the number of types this `TaggedPointer` can point to; that is, the size of
     the given parameter pack `Ts...`. */
-    constexpr auto num_types() const {return sizeof...(Ts);}
+    static constexpr auto num_types() {return sizeof...(Ts);}
 
-    /* Returns the tag of the type `T`, which depends on the ordered parameter pack `Ts...`
-    specified in the declaration of this `TaggedPointer`.
-    
-    A return value of `0` means this `TaggedPointer` was constructed with a `nullptr` (so
-    it does not have a determined pointer type). Any other return value is guaranteed to
-    fall in the range [1, num_types()], and will equal the one-indexed position of `T`
-    relative to the parameter pack `Ts...`. */
+    /* Returns the tag of the type `T` in this `TaggedPointer<Ts...>`. The tag of a type `T`
+    is determined as follows:
+    - If `T` is `std::nullptr_t` (that is, if this `TaggedPointer` was constructed or set
+    equal to `nullptr`), then its tag is 0.
+    - Otherwise, the tag of `T` equals its ONE-indexed position within the parameter pack
+    `Ts...`.
+
+    Thus, the possible tags fall in the range `[0, num_types()]`. */
     template <typename T>
-    constexpr unsigned get_tag_of_type() const {
-        /* Return `0` if this `TaggedPointer` was constructed with a `nullptr` */
-        if constexpr (std::is_same_v<T, std::nullptr_t>) {
-            return 0;
-        }
-        /* Otherwise, return the one-indexed position of `T` within `Ts...`. `IndexOfType_v`
-        returns a zero-indexed position, so we add one to make it an one-indexed position
-        because a return value of 0 is used to represent the case of the type being
-        `std::nullptr_t`, as explained above. */
-        return 1 + detail::IndexOfType_v<T, Ts...>;
+    requires detail::ContainsType<T, std::nullptr_t, Ts...>
+    static constexpr unsigned get_tag_of_type() {
+        /* If `T` is `std::nullptr_t`, then its tag is defined to be 0 (this means a
+        `TaggedPointer` constructed with `nullptr` will have tag equal to 0). Otherwise,
+        the tag of `T` is equivalent to its one-indexed position within `Ts...`. As a
+        result, the tag of `T` is equivalent to its ZERO-indexed position within
+        `std::nullptr_t, Ts...`. */
+        return detail::IndexOfType_v<T, std::nullptr_t, Ts...>;
     }
 
     /* Returns the current tag of this `TaggedPointer`. */
     auto tag() const {return static_cast<unsigned>(tagged_address >> TAG_SHIFT);}
     
     /* Returns the address of the pointer stored in this `TaggedPointer` as a `void*`. */
-    const void *ptr() const {return reinterpret_cast<void*>(tagged_address & GET_PTR_MASK);}
+    const void *ptr() const {return reinterpret_cast<const void*>(tagged_address & GET_PTR_MASK);}
     /* Returns the address of the pointer stored in this `TaggedPointer` as a `void*`. */
     void *ptr() {return reinterpret_cast<void*>(tagged_address & GET_PTR_MASK);}
 
     /* Returns the pointer stored in this `TaggedPointer` casted to a `const T*` if the current
     type pointed to by this `TaggedPointer` is the same as `T`, and returns `nullptr` otherwise.
     
-    To avoid the type equality check between `T` and the true current type pointed to by this
-    `TaggedPointer`, use `cast_unsafe()` instead. */
+    To bypass the type equality check between `T` and the true current type pointed to by this
+    `TaggedPointer`, use `cast_unchecked()` instead. */
     template <typename T>
+    requires detail::ContainsType<T, Ts...>
     const T *cast() const {
-        return is_of_type<T>() ? reinterpret_cast<const T*>(ptr()) : nullptr;
+        /* See the comments inside `const T *cast_unchecked()` as to why we should not
+        directly `reinterpret_cast` the untagged memory address directly to a `T*`. */
+        return points_to_type<T>() ? static_cast<const T*>(ptr()) : nullptr;
     }
 
     /* Returns the pointer stored in this `TaggedPointer` casted to a `T*` if the current
     type pointed to by this `TaggedPointer` is the same as `T`, and returns `nullptr` otherwise.
     
-    To avoid the type equality check between `T` and the true current type pointed to by this
-    `TaggedPointer`, use `cast_unsafe()` instead. */
+    To bypass the type equality check between `T` and the true current type pointed to by this
+    `TaggedPointer`, use `cast_unchecked()` instead. */
     template <typename T>
+    requires detail::ContainsType<T, Ts...>
     T *cast() {
-        return is_of_type<T>() ? reinterpret_cast<T*>(ptr()) : nullptr;
+        /* See the comments inside `const T *cast_unchecked()` as to why we should not
+        directly `reinterpret_cast` the untagged memory address directly to a `T*`. */
+        return points_to_type<T>() ? static_cast<T*>(ptr()) : nullptr;
     }
 
     /* Returns the pointer stored in this `TaggedPointer` casted to a `const T*`. Does not perform
     any check that this `TaggedPointer` truly points to an object of type `T`. */ 
     template <typename T>
-    const T *cast_unsafe() const {
-        return reinterpret_cast<const T*>(ptr());
+    requires detail::ContainsType<T, Ts...>
+    const T *cast_unchecked() const {
+        /* Note that we cannot just take the untagged memory address and `reinterpret_cast` it
+        directly to a `T*`, because the untagged memory address was computed by first
+        `static_cast`ing the original `T*` to a `void*`, then `reinterpret_cast`ing that
+        `void*` to a `uintptr_t` (and this is because `uintptr_t` is only guaranteed by the
+        C standard to be able to represent any `void*`, not necessarily any `T*`; there is
+        no requirement that the bit pattern for `T*` and `void*` have the same representation
+        (and it won't be, on systems that are not byte-addressable). Thus, we need to do
+        `T*` -> `void*` -> `uintptr_t`). Now, we need to reverse this process: we will first
+        `reinterpret_cast` the memory address back into a `void*` (done inside the call
+        to `ptr()`), then `static_cast` that `void*` back to a `T*`. The reason why we
+        can't just `reinterpret_cast` the untagged memory address to a `T*` is, again,
+        because `T*` and `void*` are not necessarily represented the same way (and
+        `reinterpret_cast` only guarantees that casting the `void*` to another type
+        (`uintptr_t` in this case) and then casting the `uintptr_t` back to a `void*` yields
+        the original `void*`; this, added to the fact that `void*` and `T*` may have
+        different bit-level representations, means directly `reinterpret_casting` the `uintptr_t`
+        to a `T*` is unsafe). Thus, we need to do `uintptr_t` -> `void*` -> `T*` in order to
+        guarantee that the returned pointer is correct.
+        
+        Source: http://tinyurl.com/3spmuxc6 */
+        return static_cast<const T*>(ptr());
     }
 
     /* Returns the pointer stored in this `TaggedPointer` casted to a `T*`. Does not perform any
     check that this `TaggedPointer` truly points to an object of type `T`. */ 
     template <typename T>
-    T *cast_unsafe() {
-        return reinterpret_cast<T*>(ptr());
+    requires detail::ContainsType<T, Ts...>
+    T *cast_unchecked() {
+        /* See the comments inside `const T *cast_unchecked()` as to why we should not
+        directly `reinterpret_cast` the untagged memory address directly to a `T*`. */
+        return static_cast<T*>(ptr());
     }
 
-    /* Returns `true` iff the type pointed to by this `TaggedPointer` is the same as `T`. */
+    /* Returns `true` iff `T` is the type currently pointed to by this `TaggedPointer`. */
     template <typename T>
-    bool is_of_type() const {return tag() == get_tag_of_type<T>();}
+    requires detail::ContainsType<T, Ts...>
+    bool points_to_type() const {
+        /* Simply check if the current tag of this `TaggedPointer` matches the tag
+        corresponding to the type `T`. */
+        return tag() == get_tag_of_type<T>();
+    }
 
     /* Calls the function `func`, passing to it the pointer stored in this `TaggedPointer`,
     casted to the correct type, and returns the resulting value (with value category/cv-qualifiers
@@ -195,34 +234,42 @@ public:
         return tagged_address != other.tagged_address;
     }
 
-    /* Constructs this `TaggedPointer` from the pointer to `T` `ptr`, where `T` is required to
-    be one of the types specified in the parameter pack `Ts...`. */
+    /* Constructs this `TaggedPointer` from `ptr`, a pointer to `T`. `T` is required to
+    be one of the types in the parameter pack `Ts...`. */
     template <typename T>
     /* Use C++20 to require that `T` be equal to one of the types in `Ts...`. This check is
-    done succinctly with `std::disjunction_v`, which is essentially an OR-statement. */
-    requires std::disjunction_v<std::is_same<T, Ts>...>
+    done succinctly with C++20 concepts.  */
+    requires detail::ContainsType<T, Ts...>
     TaggedPointer(const T *ptr)
         /* The `TAG_SHIFT` least significant bits of the tagged address are the bits of the actual
         memory address of the given pointer `ptr`, while the remaining bits are used to encode the
         tag of the type `T`. In other words, the tagged address is found by taking the bitwise OR
-        of the address `ptr` and the tag of `T` left-shifted by `TAG_SHIFT`. */
-        : tagged_address{reinterpret_cast<uintptr_t>(ptr)
-                         | (static_cast<uintptr_t>(get_tag_of_type<T>()) << TAG_SHIFT)}
+        of the address `ptr` and the tag of `T` left-shifted by `TAG_SHIFT`.
+        
+        Note that we first `static_cast` `ptr` to a `const void*` before we `reinterpret_cast` it
+        to a `uintptr_t`. This is because `uintptr_t` is only guaranteed to be able to hold a
+        `void*`, and not a general `T*`. Note that this means in order to turn the `uintptr_t`
+        back into a `T*`, we need to first `reinterpret_cast` it to a `void*` THEN `static_cast`
+        it back to a `T*`. See the comments in `const T *cast_unchecked()`. */
+        : tagged_address{reinterpret_cast<uintptr_t>(static_cast<const void*>(ptr))
+                       | (static_cast<uintptr_t>(get_tag_of_type<T>()) << TAG_SHIFT)}
     {}
 
     /* Observe that the constructor `TaggedPointer::TaggedPointer(const T *ptr)` will not accept
     the expression `nullptr` as an argument. This is because then `T` will deduce to
-    `std::nullptr_t`, which should never be one of the types specified in the parameter pack
+    `std::nullptr_t`, which probably isn't one of the types specified in the parameter pack
     `Ts...`. As a result, the `requires`-statement for that constructor, which mandates that
     `T` be equal to one of the types in `Ts...`, will fail, leading to a compilation error.
 
     To allow for constructing a `TaggedPointer` from `nullptr`, we simply introduce a constructor
-    that accepts a `std::nullptr_t`. This constructor constructs a tagged null pointer; a tagged
-    pointer with address 0. */
-    TaggedPointer(std::nullptr_t) : tagged_address{0} {}
+    that accepts a `std::nullptr_t`. */
+    TaggedPointer(std::nullptr_t)
+        /* The tag of `nullptr` is defined to be 0 (see `get_tag_of_type`), and `nullptr` is
+        guaranteed to `reinterpret_cast` to 0 (see http://tinyurl.com/yh5my6kc). Thus, the
+        tagged address of a tagged null pointer is 0. */
+        : tagged_address{0}
+    {}
 
-    /* The default constructor for `TaggedPointer` constructs a null pointer. That is,
-    the internal address is set to 0s. This is equivalent to using the constructor
-    `TaggedPointer::TaggedPointer(std::nullptr_t)`. */
-    TaggedPointer() : tagged_address{0} {}
+    /* The default constructor for `TaggedPointer` constructs a tagged null pointer. */
+    TaggedPointer() : TaggedPointer(nullptr) {}
 };
