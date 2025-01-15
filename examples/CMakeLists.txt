@@ -1,0 +1,3 @@
+add_executable(cpp_tagged_pointer_example example.cpp)
+
+target_link_libraries(cpp_tagged_pointer_example PRIVATE cpp_tagged_pointer)
